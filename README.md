@@ -1,9 +1,9 @@
 # caffeinate-windows
 
-A `caffeinate` command for Windows, built to feel exactly like macOS's `caffeinate`. Keeps your PC awake while it's running, then restores normal power management the moment it exits.
+A `caffeinate` command for Windows. Inspired by macOS's `caffeinate`, but adapted for the realities of Windows power management — it doesn't just hold a "system required" flag, it also looks active to Windows so the screen saver and idle-based auto-lock don't kick in.
 
 - No background service, no scheduled task, no registry edits
-- No fake mouse jiggling or simulated keystrokes
+- No mouse jiggling — uses the Win32 `SetThreadExecutionState` API plus a single `VK_F15` keypress every 30 s (a key that exists in the virtual-key table but no modern keyboard has, so nothing reacts to it)
 - Two small scripts on your PATH — that's it
 - Works from `cmd.exe`, Windows PowerShell, and PowerShell 7+
 
@@ -29,7 +29,7 @@ cd caffeinate-windows
 
 ### Manual
 
-Copy `caffeinate.ps1` and `caffeinate.cmd` into any directory that's already on your PATH. That's the whole install.
+Copy `caffeinate.ps1` and `caffeinate.cmd` into any directory that's already on your PATH.
 
 ### Custom install location
 
@@ -39,29 +39,44 @@ Copy `caffeinate.ps1` and `caffeinate.cmd` into any directory that's already on 
 
 ## Usage
 
-| Command                  | What it does                                  |
-| ------------------------ | --------------------------------------------- |
-| `caffeinate`             | Keep awake until Ctrl+C                        |
-| `caffeinate -t 3600`     | Keep awake for 1 hour                          |
-| `caffeinate -d`          | Also keep the display on                       |
-| `caffeinate -d -t 1800`  | Display on + system awake for 30 minutes       |
+| Command                  | What it does                                                  |
+| ------------------------ | ------------------------------------------------------------- |
+| `caffeinate`             | System + display awake + simulate activity, until Ctrl+C       |
+| `caffeinate -t 3600`     | Same, for one hour                                             |
+| `caffeinate -Passive`    | Hold ES flags only — no synthetic keypress                     |
 
-`-t` takes seconds (matches macOS `caffeinate -t`). `-Seconds` and `-Display` are the PowerShell-native parameter names if you'd rather spell them out.
+`-t` takes seconds (matches macOS `caffeinate -t`). `-Seconds` and `-Passive` are the PowerShell-native parameter names. `-d` / `-Display` is accepted for muscle-memory compatibility but is a no-op now that display-awake is on by default.
 
 Works identically from `cmd.exe`, Windows PowerShell, and PowerShell 7+ thanks to the `.cmd` wrapper.
 
-## Requirements
-
-- Windows 10 or 11 (anything with built-in Windows PowerShell 5.1, or PowerShell 7+)
-- No admin rights needed — installs into your user profile
-
 ## How it works
 
-`caffeinate.ps1` calls the Win32 [`SetThreadExecutionState`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate) API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (and `ES_DISPLAY_REQUIRED` when you pass `-d`). This is the official Windows mechanism for a process to declare "I'm doing work — don't sleep on me." It's what media players, backup tools, and installers use.
+Three layers, because on Windows none of them alone is enough:
 
-When the script exits — whether you hit Ctrl+C or the `-t` timer elapses — a `finally` block clears the flag, and Windows resumes normal power management immediately. There's nothing left running, nothing left to clean up, and nothing persists across reboots.
+1. **`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)`** — the official Windows mechanism for a process to declare "I'm doing work — don't sleep on me." Prevents idle sleep and display blanking due to inactivity.
+2. **A `VK_F15` keypress every 30 s** — resets the user-idle timer. This is what governs the screen saver, screen-saver password prompt, and idle-based auto-lock. `ES_*` flags don't touch the user-idle timer. F15 is used because it's a real virtual key code but no application binds it.
+3. **Re-assertion of the `ES_*` flags every 30 s** — `ES_CONTINUOUS` is supposed to persist until cleared, and usually it does, but on some Windows 11 Modern Standby devices the request is silently dropped after the OEM sleep window. Reasserting is cheap.
 
-`caffeinate.cmd` is a four-line wrapper that lets you call `caffeinate` from `cmd.exe` too, since cmd doesn't auto-execute `.ps1` files. It prefers PowerShell 7 (`pwsh`) if installed, otherwise falls back to Windows PowerShell.
+When the script exits — Ctrl+C or `-t` timer elapses — a `finally` block clears the flag and Windows resumes normal power management immediately.
+
+The `caffeinate.cmd` wrapper exists so the command works from `cmd.exe` (cmd doesn't auto-execute `.ps1` files). It prefers PowerShell 7 (`pwsh`) and falls back to Windows PowerShell 5.1.
+
+## What it does NOT do
+
+Being honest about scope:
+
+- It does not override the Start menu **Sleep** action, `shutdown /h`, or anything user-initiated
+- It does not defeat a **closed laptop lid** configured to sleep
+- It does not beat corporate **Group Policy session-timeout locks** — those run on a different timer than the user-idle timer and are unreachable from user space
+- It does not override **OEM-managed Modern Standby** battery behavior
+- It does not move the mouse cursor or send any input you'd see or hear
+
+On a corporate-managed machine, run `powercfg /requests` from an **elevated** prompt while `caffeinate` is running to confirm Windows is honoring the request. If you see a `pwsh.exe` or `powershell.exe` entry under the `SYSTEM:` section pointing to `caffeinate.ps1`, the API call is being honored. If you're still seeing the screen lock, the cause is auto-lock policy (separate from sleep) — `caffeinate` already addresses the most common version of that with the F15 ping, but a hard-enforced GPO session timeout will still win.
+
+## Requirements
+
+- Windows 10 or 11 (Windows PowerShell 5.1 ships with both; PowerShell 7 used automatically if present)
+- No admin rights needed — installs into your user profile
 
 ## Uninstall
 
@@ -69,7 +84,7 @@ When the script exits — whether you hit Ctrl+C or the `-t` timer elapses — a
 .\uninstall.ps1
 ```
 
-To also remove the install directory from your user PATH (only does so if the dir is empty after removing the scripts):
+To also remove the install directory from your user PATH (only if the dir is empty afterward):
 
 ```powershell
 .\uninstall.ps1 -RemoveFromPath
